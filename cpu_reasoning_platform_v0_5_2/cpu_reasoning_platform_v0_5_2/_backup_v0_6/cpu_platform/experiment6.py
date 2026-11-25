@@ -1,0 +1,363 @@
+"""Experiment 006: does a small CPU model + verified search beat a bigger model
+at the SAME compute?
+
+This is the first experiment that directly tests the project thesis:
+"frontier-level reasoning without repeatedly processing billions of parameters".
+Token generation on a CPU streams every weight per token, so a 0.6B model is
+several times cheaper per token than a 4B/8B one. The question is whether
+spending that saving on many cheap, exactly-checked attempts buys more accuracy
+than spending it on a bigger model once.
+
+Arms (all on the same questions, paired):
+  small_greedy       small model, 1 answer, temperature 0
+  small_cot          small model, reasons in prose then answers, temperature 0
+  large_greedy       large model, 1 answer, temperature 0            (reference)
+  large_cot          large model, reasons in prose then answers      (STRONG reference)
+  small_vote         small model, N sampled answers, majority vote   (control: no verifier)
+  small_constrained  small model, N grammar-constrained plans computed exactly, vote (v0.6)
+  small_verified     small model, N free-form step plans, verified (v0.5.2; not default:
+                     0/8 valid plans in the first real run)
+
+For sampled arms every prefix k = 1..N is scored from the same samples, giving an
+accuracy-vs-cost curve. Cost is model-server CPU-seconds when the servers' PIDs
+are metered (psutil), otherwise model wall-clock seconds (stated in the output).
+
+Typical run (two launcher windows first, see docs/benchmark6.md):
+    python -m cpu_platform.experiment6 --dataset data/gsm8k_test.jsonl --limit 100
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from fractions import Fraction
+import json
+from pathlib import Path
+import random
+import statistics
+import sys
+from urllib.parse import urlparse
+
+from cpu_first.benchmark import load_questions
+from cpu_first.core import LocalLlama, gsm8k_gold
+from . import __version__
+from .experiment4 import sha256_file, source_sha256
+from .hardware import detect
+from .search import make_cpu_meter, prefix_votes, sample
+
+ARM_SPEC = {  # arm -> (model role, candidate kind, sampled?, verifier required?)
+    "small_greedy": ("small", "answer", False, False),
+    "small_cot": ("small", "cot", False, False),
+    "large_greedy": ("large", "answer", False, False),
+    "large_cot": ("large", "cot", False, False),
+    "small_vote": ("small", "answer", True, False),
+    "small_constrained": ("small", "cplan", True, True),
+    "small_verified": ("small", "plan", True, True),
+}
+ARMS = ("small_greedy", "small_cot", "large_greedy", "large_cot", "small_vote", "small_constrained")
+REFERENCES = ("large_greedy", "large_cot")
+KIND_MAX_TOKENS = {"answer": 64, "cot": 512, "plan": 512, "cplan": 256}
+# Errors that a correctly applied grammar makes impossible; any of them means the
+# server ignored the grammar (see preflight and grammar_violation_rate).
+GRAMMAR_VIOLATIONS = ("No JSON object", "Expected exactly", "operands must be", "bad number",
+                      "ungrounded number", "not an earlier step", "expected op, a, b",
+                      "Plan must have")
+
+
+def is_correct(answer: str | None, gold: Fraction) -> bool:
+    if answer is None:
+        return False
+    try:
+        return Fraction(answer) == gold
+    except (ValueError, ZeroDivisionError):
+        return False
+
+
+def run_experiment(models: dict, questions: list[dict], out: Path, *, arms: tuple[str, ...] = ARMS,
+                   samples: int = 8, temperature: float = 0.7, seed: int = 606,
+                   max_tokens: int | None = None, meters: dict | None = None,
+                   warmup: bool = True) -> list[dict]:
+    """Run every arm on every question; write one JSON line per question."""
+    meters = meters or {}
+    unknown = [a for a in arms if a not in ARM_SPEC]
+    if unknown or not arms or len(set(arms)) != len(arms):
+        raise ValueError(f"Invalid arms: {arms}")
+    for arm in arms:
+        if ARM_SPEC[arm][0] not in models:
+            raise ValueError(f"Arm {arm} needs the {ARM_SPEC[arm][0]} model")
+    if not 1 <= samples <= 64 or not 0 < temperature <= 2:
+        raise ValueError("samples must be 1..64 and temperature in (0, 2]")
+    if warmup:
+        for model in models.values():
+            model.chat("Reply with JSON {\"answer\":\"1\"}.", "1", max_tokens=16)
+    order = list(range(len(questions)))
+    random.Random(seed).shuffle(order)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    records = []
+    with out.open("w", encoding="utf-8") as stream:
+        for position, qi in enumerate(order):
+            item = questions[qi]
+            gold = gsm8k_gold(item["answer"])
+            record = {"id": str(item.get("id", qi)), "gold": str(gold), "arms": {}}
+            # Rotate arm order so warm caches / thermal drift do not favour one arm.
+            rotated = arms[position % len(arms):] + arms[:position % len(arms)]
+            for arm in rotated:
+                role, kind, sampled, _ = ARM_SPEC[arm]
+                limit = KIND_MAX_TOKENS[kind] if max_tokens is None or kind in ("answer", "cplan") \
+                    else max_tokens
+                drawn = sample(models[role], item["question"], samples if sampled else 1, kind=kind,
+                               temperature=temperature if sampled else 0.0,
+                               seed=seed * 1000 + qi * 100, max_tokens=limit,
+                               cpu_meter=meters.get(role))
+                record["arms"][arm] = [s.to_dict() for s in drawn]
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+            stream.flush()
+            records.append(record)
+            brief = " ".join(f"{a}={'ok' if is_correct(prefix_votes_from(record, a)[-1], gold) else 'x'}"
+                             for a in arms)
+            print(f"[{position + 1}/{len(questions)}] {record['id']}: {brief}", flush=True)
+    return records
+
+
+def _samples(record: dict, arm: str):
+    from .search import Sample
+    return [Sample.from_dict(s) for s in record["arms"][arm]]
+
+
+def prefix_votes_from(record: dict, arm: str) -> list[str | None]:
+    return prefix_votes(_samples(record, arm), require_verified=ARM_SPEC[arm][3])
+
+
+def _bootstrap(diffs: list[int], seed: int = 6006) -> list[float]:
+    rng = random.Random(seed)
+    boots = sorted(sum(rng.choice(diffs) for _ in diffs) / len(diffs) for _ in range(2000))
+    return [round(boots[49], 4), round(boots[1949], 4)]
+
+
+def summarize(records: list[dict], arms: tuple[str, ...], cost_unit: str) -> dict:
+    if not records:
+        raise ValueError("No records")
+    for r in records:
+        if set(r["arms"]) != set(arms):
+            raise ValueError(f"Record {r['id']} is missing arms; refusing a partial comparison")
+    cost_key = "cpu_seconds" if cost_unit == "cpu_seconds" else "latency_s"
+    n = len(records)
+    curves, correct_at = {}, {}
+    for arm in arms:
+        lengths = {len(r["arms"][arm]) for r in records}
+        if len(lengths) != 1:
+            raise ValueError(f"Arm {arm} has inconsistent sample counts")
+        k_max = lengths.pop()
+        curve, per_k = [], []
+        for k in range(1, k_max + 1):
+            hits, costs, tokens, abstain = [], [], [], 0
+            for r in records:
+                gold = Fraction(r["gold"])
+                answer = prefix_votes_from(r, arm)[k - 1]
+                hits.append(int(is_correct(answer, gold)))
+                abstain += answer is None
+                first_k = r["arms"][arm][:k]
+                if any(s[cost_key] is None for s in first_k):
+                    raise ValueError(f"Missing {cost_key} in arm {arm}; cost unit must be uniform")
+                costs.append(sum(s[cost_key] for s in first_k))
+                tokens.append(sum(s["completion_tokens"] for s in first_k))
+            per_k.append(hits)
+            curve.append({"k": k, "accuracy": round(sum(hits) / n, 4),
+                          "abstain_rate": round(abstain / n, 4),
+                          "mean_cost": round(statistics.mean(costs), 4),
+                          "mean_completion_tokens": round(statistics.mean(tokens), 1),
+                          "verified_sample_rate": (round(sum(s["verified"] for r in records
+                                                             for s in r["arms"][arm][:k]) / (n * k), 4)
+                                                   if ARM_SPEC[arm][3] else None),
+                          "unparseable_rate": round(sum(s["answer"] is None and not ARM_SPEC[arm][3]
+                                                        for r in records for s in r["arms"][arm][:k])
+                                                    / (n * k), 4)})
+        curves[arm] = curve
+        correct_at[arm] = per_k
+
+    comparisons = {}
+    for reference in (r for r in REFERENCES if r in arms):
+        ref = curves[reference][0]
+        ref_hits = correct_at[reference][0]
+        for arm in arms:
+            if not ARM_SPEC[arm][2]:
+                continue
+            within = [p for p in curves[arm] if p["mean_cost"] <= ref["mean_cost"]]
+            entry = {"reference_accuracy": ref["accuracy"], "reference_mean_cost": ref["mean_cost"]}
+            if within:
+                k = within[-1]["k"]
+                diffs = [a - b for a, b in zip(correct_at[arm][k - 1], ref_hits)]
+                entry.update({
+                    "matched_k": k, "matched_accuracy": within[-1]["accuracy"],
+                    "matched_mean_cost": within[-1]["mean_cost"],
+                    "accuracy_minus_reference": round(statistics.mean(diffs), 4),
+                    "exploratory_paired_bootstrap_95pct": _bootstrap(diffs),
+                    "wins_only_this_arm": sum(d == 1 for d in diffs),
+                    "wins_only_reference": sum(d == -1 for d in diffs),
+                })
+            else:
+                entry.update({"matched_k": None,
+                              "note": "Even one sample costs more than the reference; no matched point"})
+            reach = next((p for p in curves[arm] if p["accuracy"] >= ref["accuracy"]), None)
+            entry["first_k_reaching_reference_accuracy"] = reach["k"] if reach else None
+            entry["cost_ratio_at_that_k"] = (round(reach["mean_cost"] / ref["mean_cost"], 3)
+                                             if reach and ref["mean_cost"] else None)
+            comparisons[f"{arm}_vs_{reference}"] = entry
+    for checked in ("small_constrained", "small_verified"):
+        if checked not in arms or "small_vote" not in arms:
+            continue
+        k = min(len(curves[checked]), len(curves["small_vote"]))
+        diffs = [a - b for a, b in zip(correct_at[checked][k - 1], correct_at["small_vote"][k - 1])]
+        comparisons[f"verifier_effect_{checked}_vs_small_vote"] = {
+            "k": k, "accuracy_difference": round(statistics.mean(diffs), 4),
+            "exploratory_paired_bootstrap_95pct": _bootstrap(diffs),
+            "note": f"{checked} minus small_vote with the same number of samples; isolates "
+                    "structured computation + checking from extra sampling. Costs can differ.",
+        }
+    if "small_constrained" in arms:
+        drawn = [s for r in records for s in r["arms"]["small_constrained"]]
+        violations = sum(any(v in (s["error"] or "") for v in GRAMMAR_VIOLATIONS) for s in drawn)
+        comparisons["grammar_violation_rate"] = round(violations / len(drawn), 4) if drawn else None
+    return {"paired_questions": n, "cost_unit": cost_unit, "curves": curves, "comparisons": comparisons}
+
+
+def preflight_grammar(model) -> str | None:
+    """One constrained request; returns a problem description or None if grammars work."""
+    from .constrained import CONSTRAINED_PLAN_PROMPT, build_grammar, question_literals, to_checked_plan
+    from cpu_first.core import json_object
+    question = "A bus has 25 passengers. At the first stop, 7 leave and 9 board. How many passengers now?"
+    try:
+        reply = model.chat(CONSTRAINED_PLAN_PROMPT, question, max_tokens=256,
+                           grammar=build_grammar(question_literals(question)))
+    except RuntimeError as exc:
+        return (f"the server rejected a grammar-constrained request ({exc}). Update llama.cpp, or run "
+                f"without the small_constrained arm (--arms ...).")
+    try:
+        to_checked_plan(question, json_object(reply.content))
+    except Exception as exc:  # noqa: BLE001 - any failure here means the grammar was not applied
+        return (f"the server accepted the grammar but its reply does not conform ({exc}): "
+                f"reply was {reply.content[:200]!r}. The chat template may be overriding custom grammars.")
+    return None
+
+
+def _port(url: str) -> int | None:
+    return urlparse(url).port
+
+
+def _launch_manifest(path: str | None, url: str, results: Path) -> dict | None:
+    candidate = Path(path) if path else results / f"launch_{_port(url)}.json"
+    try:
+        return json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Small+verified-search vs large model at matched CPU compute")
+    p.add_argument("--dataset", default="data/smoke.jsonl")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--small-url", default="http://127.0.0.1:8080")
+    p.add_argument("--large-url", default="http://127.0.0.1:8081", help="'none' to skip the large arm")
+    p.add_argument("--arms", default=",".join(ARMS))
+    p.add_argument("--samples", type=int, default=8)
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--max-tokens", type=int, default=None,
+                   help="cap for reasoning (cot) and free-form plan replies; default 512")
+    p.add_argument("--seed", type=int, default=606)
+    p.add_argument("--small-pid", type=int, help="llama.cpp PID (default: from launch manifest)")
+    p.add_argument("--large-pid", type=int)
+    p.add_argument("--small-launch-manifest")
+    p.add_argument("--large-launch-manifest")
+    p.add_argument("--output", default="results/experiment6.jsonl")
+    args = p.parse_args(argv)
+
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    if args.large_url.lower() == "none":
+        arms = tuple(a for a in arms if ARM_SPEC.get(a, ("",))[0] != "large")
+    if not arms or any(a not in ARM_SPEC for a in arms) or len(set(arms)) != len(arms):
+        p.error(f"--arms must be distinct values from {', '.join(ARMS)}")
+    if args.limit < 1:
+        p.error("--limit must be positive")
+    out = Path(args.output)
+    results = out.parent
+    dataset = Path(args.dataset)
+    questions = load_questions(dataset, args.limit)
+    if len(questions) < 30:
+        print("WARNING: fewer than 30 questions - a software check, not evidence.", file=sys.stderr)
+
+    roles = {ARM_SPEC[a][0] for a in arms}
+    urls = {"small": args.small_url, "large": args.large_url}
+    manifests = {role: _launch_manifest(getattr(args, f"{role}_launch_manifest"), urls[role], results)
+                 for role in roles}
+    models = {}
+    for role in sorted(roles):
+        try:
+            models[role] = LocalLlama(urls[role], timeout=600)
+        except (OSError, RuntimeError, ValueError) as exc:
+            port = _port(urls[role])
+            hint = "qwen3-0.6b" if role == "small" else "qwen3-8b (or qwen3-4b)"
+            print(f"ERROR: no llama.cpp server answering at {urls[role]} ({role} model): {exc}\n"
+                  f"Start it in a SEPARATE window and leave that window alone:\n"
+                  f"  py -m cpu_platform.launch --model {hint} --port {port}\n"
+                  + ("Or skip the large-model arms with --large-url none\n" if role == "large" else ""),
+                  file=sys.stderr)
+            return 2
+    if "small_constrained" in arms:
+        problem = preflight_grammar(models["small"])
+        if problem:
+            print("ERROR: " + problem, file=sys.stderr)
+            return 3
+    if len(roles) == 2 and models["small"].model == models["large"].model:
+        print("WARNING: small and large servers report the same model id.", file=sys.stderr)
+
+    meters, meter_notes = {}, []
+    for role in roles:
+        explicit = getattr(args, f"{role}_pid")
+        pid = explicit or ((manifests[role] or {}).get("llama_cpp") or {}).get("pid")
+        if pid is None:
+            continue
+        try:
+            meters[role] = make_cpu_meter(pid)
+        except RuntimeError as exc:
+            if explicit:
+                p.error(str(exc))
+            meter_notes.append(f"{role}: {exc}")
+    cost_unit = "cpu_seconds" if set(meters) == roles else "model_wall_seconds"
+    if cost_unit != "cpu_seconds":
+        meters = {}  # one unit for every arm, never mixed
+        print("NOTE: costs use model wall-clock seconds. For CPU-seconds, install psutil and start the "
+              "servers with cpu_platform.launch (or pass --small-pid/--large-pid).", file=sys.stderr)
+
+    records = run_experiment(models, questions, out, arms=arms, samples=args.samples,
+                             temperature=args.temperature, seed=args.seed,
+                             max_tokens=args.max_tokens, meters=meters)
+    summary = summarize(records, arms, cost_unit)
+    report = {
+        "experiment": "006 matched-compute small+search vs large", "release": __version__,
+        "recorded_utc": datetime.now(timezone.utc).isoformat(),
+        "dataset": {"file": str(dataset), "sha256": sha256_file(dataset), "questions": len(questions)},
+        "source_sha256": source_sha256(),
+        "models": {role: {"url": urls[role], "server_model_id": models[role].model,
+                          "launch_manifest": manifests[role]} for role in roles},
+        "settings": {"arms": arms, "samples": args.samples, "temperature": args.temperature,
+                     "max_tokens": args.max_tokens, "seed": args.seed},
+        "hardware": detect(measure_bandwidth=False),
+        "metering_notes": meter_notes,
+        "results": summary,
+        "limitations": [
+            "CPU-only execution is evidenced by launch manifests and logs, not attested hardware.",
+            "Both servers should run on the same machine, one request at a time; check the manifests.",
+            "Wall-clock cost includes scheduling noise; CPU-seconds exclude memory-stall energy.",
+            "Bootstrap intervals are exploratory; use 100+ held-out questions before drawing conclusions.",
+            "The verifier checks arithmetic and literal provenance only, not the interpretation of the question.",
+        ],
+        "warning": "SMOKE TEST ONLY" if len(questions) < 30 else "Exploratory result",
+    }
+    path = out.with_suffix(".summary.json")
+    path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(json.dumps(summary["comparisons"], indent=2))
+    print("Summary:", path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

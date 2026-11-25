@@ -1,0 +1,12 @@
+{"id":"arithmetic-01","domain":"math","question":"Calculate: (12+8)/5","grading":"numeric_exact","expected":"4"}
+{"id":"arithmetic-02","domain":"math","question":"Calculate: 13*7-12","grading":"numeric_exact","expected":"79"}
+{"id":"wordmath-01","domain":"math","question":"There are 6 boxes with 8 pencils each. Nine pencils break. How many remain? End with a line 'Final answer: NUMBER'.","grading":"numeric_exact","expected":"39"}
+{"id":"wordmath-02","domain":"math","question":"A factory makes 240 parts each hour for 8 hours. Fifteen percent fail inspection. How many usable parts remain? End with 'Final answer: NUMBER'.","grading":"numeric_exact","expected":"1632"}
+{"id":"logic-01","domain":"logic","question":"All mammals are warm-blooded. A dolphin is a mammal. Does it follow that a dolphin is warm-blooded? Explain.","grading":"manual"}
+{"id":"logic-02","domain":"logic","question":"If P implies Q and Q is true, must P be true? Give a counterexample if not.","grading":"manual"}
+{"id":"code-01","domain":"code","question":"Write a Python function that finds the first non-repeated character of a string. Explain its complexity.","grading":"manual"}
+{"id":"code-02","domain":"code","question":"Explain why this Python function fails on an empty array: def average(xs): return sum(xs)/len(xs). Give a corrected version.","grading":"manual"}
+{"id":"science-01","domain":"science","question":"Why does increasing atmospheric CO2 raise Earth's surface temperature? Explain the main physical mechanism.","grading":"manual"}
+{"id":"science-02","domain":"science","question":"What is the difference between correlation and causation? Provide an example.","grading":"manual"}
+{"id":"factual-01","domain":"factual","question":"What is the capital of Australia? How certain are you?","grading":"manual"}
+{"id":"general-01","domain":"general","question":"Compare two approaches to handling intermittent failures in a backend service: exponential retries and circuit breakers.","grading":"manual"}

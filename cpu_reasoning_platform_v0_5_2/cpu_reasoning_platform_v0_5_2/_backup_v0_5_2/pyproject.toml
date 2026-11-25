@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpu-reasoning-platform"
+version = "0.5.2"
+description = "CPU-native verifiable reasoning research preview"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "CPU-First Research" }]
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cpu_platform*", "cpu_first*"]
+
+[tool.setuptools.package-data]
+cpu_platform = ["static/*.html"]

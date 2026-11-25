@@ -1,0 +1,31 @@
+name: CPU-first platform validation
+on:
+  push:
+  pull_request:
+
+jobs:
+  standard-library-tests:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile modules
+        run: python -m compileall -q cpu_first cpu_platform tests
+      - name: Run cumulative offline test suite
+        run: python -m unittest discover -s tests -v
+      - name: Run offline semantic demonstration
+        run: python -m examples.verify_semantic
+      - name: Hardware detection and launcher dry run (no model)
+        run: |
+          python -m cpu_platform.hardware --no-bandwidth
+          python -m cpu_platform.launch --model qwen3-0.6b --dry-run
+      - name: Mark real-model coverage as NOT RUN
+        run: python -c "print('Real CPU LLM inference: NOT RUN. Job tests use fake models and exact arithmetic.')"

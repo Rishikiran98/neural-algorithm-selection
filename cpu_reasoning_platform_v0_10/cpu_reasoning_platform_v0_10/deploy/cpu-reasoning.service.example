@@ -1,0 +1,19 @@
+# Example Linux systemd USER service, assuming llama.cpp runs locally on 8080.
+# Copy to ~/.config/systemd/user/cpu-reasoning.service and edit paths.
+[Unit]
+Description=CPU Reasoning API Preview
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/USER/cpu_reasoning_platform
+ExecStart=/usr/bin/python3 -m cpu_platform.server --port 8070 --model-url http://127.0.0.1:8080
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

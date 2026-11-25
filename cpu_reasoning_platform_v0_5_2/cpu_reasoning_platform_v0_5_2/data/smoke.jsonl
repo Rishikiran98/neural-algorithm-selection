@@ -1,0 +1,5 @@
+{"id":"s1","question":"Maya has 12 apples and buys 8 more. She splits them equally into 5 boxes. How many apples are in each box?","answer":"20 / 5 = 4. #### 4"}
+{"id":"s2","question":"A bus has 25 passengers. At the first stop, 7 leave and 9 board. How many passengers now?","answer":"25 - 7 + 9 = 27. #### 27"}
+{"id":"s3","question":"A store charges $12 per notebook. You buy 3 notebooks and pay with $50. How much change?","answer":"50 - 12 * 3 = 14. #### 14"}
+{"id":"s4","question":"A factory produces 15 toys per hour for 4 hours. It discards 8 defective toys. How many remain?","answer":"15*4-8=52. #### 52"}
+{"id":"s5","question":"A shop discounts a $80 jacket by 25 percent. What is its new price in dollars?","answer":"80 * (1 - 25/100)=60. #### 60"}

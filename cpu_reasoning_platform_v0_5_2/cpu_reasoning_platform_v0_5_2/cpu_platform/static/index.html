@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CPU Reasoning Playground</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#e4edf5;background:#07111b;font-synthesis:none}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 80% 0%,#15324a 0,transparent 44%),#07111b}
+main{max-width:1020px;margin:0 auto;padding:58px 25px 90px}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.15em;color:#82bed9;font-weight:700}
+h1{font-size:clamp(36px,5vw,60px);line-height:1.07;letter-spacing:-.055em;margin:20px 0 14px;font-weight:750}
+.lead{font-size:16px;color:#9caebf;line-height:1.7;max-width:690px;margin-bottom:30px}
+.cols{display:grid;grid-template-columns:1.12fr .88fr;gap:18px}.panel{background:rgba(14,28,42,.92);border:1px solid #294052;border-radius:20px;padding:24px;box-shadow:0 16px 50px #0003}
+label{font-size:13px;color:#a8bdc9;font-weight:650;display:block;margin-bottom:9px}textarea,select,input{font:inherit;color:#e9f6ff;background:#091622;border:1px solid #30495b;border-radius:10px;width:100%;padding:13px}textarea{resize:vertical;min-height:150px;line-height:1.55}select{height:47px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-top:15px}button{background:#71ddca;color:#09202b;border:none;border-radius:10px;padding:14px 18px;font-size:14px;font-weight:750;cursor:pointer;transition:background .16s}button:hover{background:#9ef7e7}button:disabled{opacity:.55;cursor:wait}button.secondary{background:#1d3447;color:#d4e3ee;font-size:12px;padding:8px 11px}
+.controls{margin-top:19px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.status{font-size:12px;color:#9aabba}.badge{display:inline-flex;align-items:center;gap:7px;background:#172d3b;padding:8px 11px;border-radius:100px;font-size:12px;color:#b4d7e1;margin-bottom:20px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#71ddca}.answer{font-size:48px;letter-spacing:-.045em;margin:16px 0;word-break:break-word;color:#e6f6fd}.muted{color:#8fa6b5;font-size:13px;line-height:1.6}
+.sep{height:1px;background:#2d4050;margin:22px 0}.meta{display:grid;grid-template-columns:1fr 1fr;gap:14px}.meta strong{display:block;font-size:19px;margin-top:5px}.meta span{font-size:11px;color:#8aa8b9}
+pre{overflow:auto;white-space:pre-wrap;word-break:break-word;background:#091622;color:#b8d1de;padding:12px;border-radius:9px;font-size:12px;line-height:1.6}
+footer{font-size:12px;color:#708999;margin-top:25px;line-height:1.6}a{color:#9fe8dc}#resultLabel{font-size:12px;color:#9cb9ca}#detail{display:none}
+@media(max-width:780px){main{padding:30px 14px}.cols{grid-template-columns:1fr}.panel{padding:18px}h1{font-size:38px}}
+</style></head><body><main>
+<div class="eyebrow">CPU-first research · v0.8.0</div>
+<h1>Reasoning, without<br/>a GPU.</h1>
+<p class="lead">A live local prototype: exact arithmetic runs with zero model calls. Word problems use a small CPU-only model when a local llama.cpp server is available. New in v0.5: durable queued jobs, per-key isolation, and bounded CPU workers when local persistence is enabled. Unsupported language is rejected, not called verified. This is not frontier-level AI.</p>
+<div class="cols"><section class="panel">
+<div class="badge"><span class="dot"></span><span id="readiness">Checking local model...</span></div>
+<label for="question">Problem</label><textarea id="question">calculate: 12*(7+3)</textarea>
+<div class="two"><div><label for="mode">Execution route</label><select id="mode"><option value="auto">Auto (adaptive for word problems)</option><option value="adaptive">Adaptive (up to 2 calls)</option><option value="baseline">Neural baseline</option><option value="hybrid">Neural + arithmetic</option><option value="proof">Step-graph proof (up to 2 calls)</option><option value="semantic">Template-checked graph (restricted inputs)</option></select></div>
+<div><label for="apikey">Local API key (optional)</label><input id="apikey" type="password" autocomplete="off" placeholder="Only if configured" /></div></div>
+<div class="controls"><button id="run">Execute on CPU</button><button class="secondary" id="sample">Try word problem</button><span class="status" id="network"></span></div>
+</section><section class="panel" aria-live="polite">
+<div id="resultLabel">RESULT</div><div id="answer" class="answer">120?</div>
+<p id="scope" class="muted">Click Execute to run the local computation.</p>
+<div class="sep"></div><div class="meta"><div><span>MODEL CALLS</span><strong id="calls">0</strong></div><div><span>LATENCY</span><strong id="latency">Not run</strong></div><div><span>ROUTE</span><strong id="route" style="font-size:15px">Not run</strong></div><div><span>CHECKS</span><strong id="verified" style="font-size:15px">Not run</strong></div></div>
+<div id="detail"><div class="sep"></div><label for="json">Full response</label><pre id="json"></pre></div>
+</section></div>
+<section class="panel" style="margin-top:18px"><div class="eyebrow">Offline verifier · zero model calls</div>
+<h2 style="margin:12px 0 10px">Audit a reasoning graph</h2>
+<p class="muted">This independent checker recomputes declared arithmetic steps and checks numbers appear in the question. Optional semantic checking only recognizes a few strict English templates. Most natural-language problems remain unsupported.</p>
+<label for="proofQuestion">Original problem</label>
+<textarea id="proofQuestion" style="min-height:65px">Maya has 12 apples, buys 8 more, and puts them equally into 5 boxes.</textarea>
+<label for="plan" style="margin-top:16px">Structured plan (JSON)</label>
+<textarea id="plan" style="min-height:190px;font-family:ui-monospace,Consolas,monospace;font-size:12px"></textarea>
+<div class="controls"><button id="verify">Arithmetic verification</button><button class="secondary" id="verifySemantic">Template semantic check</button><span class="status" id="verifyStatus"></span></div>
+<pre id="proofOutput" aria-live="polite" style="display:none"></pre>
+</section>
+<section class="panel" style="margin-top:18px"><div class="eyebrow">Local job console · v0.5</div>
+<h2 style="margin:12px 0 10px">Durable CPU job queue</h2>
+<p class="muted">Submit a problem in the main form as a persistent background job. Only enabled when the server starts with <code>--jobs-db</code>. Job inputs and results are stored in plaintext on the local disk for the configured retention period. This is a single-node queue, not a cloud service.</p>
+<div class="controls"><button id="enqueue">Queue current problem</button><button id="jobrefresh" class="secondary">Refresh status</button><button id="jobcancel" class="secondary">Cancel if queued</button><span class="status" id="jobmessage">No job submitted</span></div>
+<label for="jobid" style="margin-top:15px">Job ID</label><input id="jobid" autocomplete="off" placeholder="Paste a 32-character job ID" />
+<pre id="joboutput" aria-live="polite" style="display:none"></pre>
+</section><footer>All computation is local. Arithmetic claims and numeric grounding checks cannot prove whether a model interpreted the word problem correctly. This preview is restricted to loopback and is not hardened for public deployment.</footer>
+</main>
+<script>
+const $=x=>document.getElementById(x);
+const headers=()=>{const h={'Content-Type':'application/json'};if($('apikey').value)h.Authorization='Bearer '+$('apikey').value;return h};
+async function check(){try{const r=await fetch('/readyz',{headers:headers()});$('readiness').textContent=r.ok?'Local model is ready':'Local model offline; exact arithmetic available'}catch(e){$('readiness').textContent='Model status unavailable'}}
+async function run(){const b=$('run');b.disabled=true;$('network').textContent='Running';try{const r=await fetch('/v1/reason',{method:'POST',headers:headers(),body:JSON.stringify({question:$('question').value,mode:$('mode').value,max_calls:2})});const x=await r.json();$('answer').textContent=x.answer??'No answer';$('scope').textContent=x.verification_scope||x.detail||x.error||'Request failed';$('calls').textContent=x.usage?.model_calls??'N/A';$('latency').textContent=x.usage?x.usage.total_latency_ms+' ms':'N/A';$('route').textContent=x.route||'N/A';$('verified').textContent=x.semantically_verified===true?'Restricted semantic template':(x.numeric_grounding_passed===true?'Arithmetic + literal grounding':(x.arithmetic_verified?'Arithmetic only':'No'));$('resultLabel').textContent=x.status==='ok'?'RESULT':'REQUEST STATUS: '+(x.status||r.status);$('detail').style.display='block';$('json').textContent=JSON.stringify(x,null,2);$('network').textContent=r.ok?'Complete':'HTTP '+r.status}catch(e){$('answer').textContent='Connection failed';$('scope').textContent='Check that the local API is running.';$('network').textContent='Offline'}finally{b.disabled=false}}
+$('run').addEventListener('click',run);$('sample').addEventListener('click',()=>{$('question').value='Maya has 12 apples and buys 8 more. She puts them equally into 5 boxes. How many apples are in each box?';$('mode').value='auto'});
+const samplePlan={steps:[{id:'s1',op:'add',inputs:[{literal:'12'},{literal:'8'}],claim:'20'},{id:'s2',op:'divide',inputs:[{ref:'s1'},{literal:'5'}],claim:'4'}],result:'s2'};
+$('plan').value=JSON.stringify(samplePlan,null,2);
+async function audit(semantic){const b=$(semantic?'verifySemantic':'verify');b.disabled=true;$('verifyStatus').textContent='Verifying';try{const plan=JSON.parse($('plan').value);const response=await fetch(semantic?'/v1/verify-semantic-plan':'/v1/verify-plan',{method:'POST',headers:headers(),body:JSON.stringify({question:$('proofQuestion').value,plan})});const obj=await response.json();$('verifyStatus').textContent=obj.status==='ok'?(semantic?'Template and arithmetic checked':'Arithmetic checked'):'Plan rejected or unsupported';$('proofOutput').textContent=JSON.stringify(obj,null,2);$('proofOutput').style.display='block';}catch(e){$('verifyStatus').textContent='Invalid JSON or request failed';$('proofOutput').textContent=String(e);$('proofOutput').style.display='block';}finally{b.disabled=false}}
+$('verify').addEventListener('click',()=>audit(false));
+$('verifySemantic').addEventListener('click',()=>audit(true));
+let currentJobPoll=null;
+async function showJob(){const id=$('jobid').value.trim();if(!/^[a-f0-9]{32}$/.test(id)){$('jobmessage').textContent='Enter a valid job ID';return null}try{const r=await fetch('/v1/jobs/'+id,{headers:headers()});const obj=await r.json();$('joboutput').style.display='block';$('joboutput').textContent=JSON.stringify(obj,null,2);$('jobmessage').textContent=obj.status||obj.error||('HTTP '+r.status);return obj}catch(e){$('jobmessage').textContent='Unable to reach server';return null}}
+async function enqueue(){const b=$('enqueue');b.disabled=true;try{const r=await fetch('/v1/jobs',{method:'POST',headers:headers(),body:JSON.stringify({question:$('question').value,mode:$('mode').value,max_calls:2})});const obj=await r.json();if(obj.id){$('jobid').value=obj.id;await showJob();if(currentJobPoll)clearInterval(currentJobPoll);currentJobPoll=setInterval(async()=>{const latest=await showJob();if(latest && ['succeeded','rejected','failed','cancelled','interrupted'].includes(latest.status)){clearInterval(currentJobPoll);currentJobPoll=null}},1500)}else{$('jobmessage').textContent=obj.error||('HTTP '+r.status)}}catch(e){$('jobmessage').textContent='Queue unavailable'}finally{b.disabled=false}}
+async function cancelJob(){const id=$('jobid').value.trim();if(!/^[a-f0-9]{32}$/.test(id)){return}try{const r=await fetch('/v1/jobs/'+id,{method:'DELETE',headers:headers()});const obj=await r.json();$('jobmessage').textContent=obj.status||obj.error||('HTTP '+r.status);await showJob()}catch(e){$('jobmessage').textContent='Cancel failed'}}
+$('enqueue').addEventListener('click',enqueue);
+$('jobrefresh').addEventListener('click',showJob);
+$('jobcancel').addEventListener('click',cancelJob);
+$('apikey').addEventListener('change',check);check();
+</script></body></html>
